@@ -120,9 +120,3 @@ Large input datasets and generated analysis outputs are not included in this scr
 - Bacterial features represent deposited probe-group annotations, not independently verified species identities, viability, or absolute abundance.
 - Spatial associations and inferred communication do not establish causal or physical interactions.
 - External predictive evaluation includes six patient pairs from the same publication as the development cohort and does not establish clinical validity.
-
-## Repository Scope
-
-This repository presents the main analytical code for academic review and research applications. Checker scripts are excluded.
-
-The cleaned scripts preserve the original executable analysis. Full analyses have not been rerun as part of repository preparation.
