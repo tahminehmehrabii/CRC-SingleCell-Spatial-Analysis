@@ -1,552 +1,112 @@
-# CORE WORKFLOW: 01_Data_Preprocessing.R
-# Existing output directories are retained for compatibility.
-# ============================================================
-# STEP 01 — Data and Preprocessing
-# GSE132465 colorectal cancer scRNA-seq
-#
-# Output:
-# E:/CRC/Results/Results/01_Data_and_Preprocessing
-# ============================================================
-
+# GSE132465: import 10 matched tumor-normal pairs and apply cell-level QC.
+# Requires locally downloaded GEO files; no installation or downloads.
 local({
-  
-  # ----------------------------------------------------------
-  # 1. Input and output paths
-  # ----------------------------------------------------------
-  
-  input_root <- "E:/CRC/Results/GSE132465_scRNA"
-  
-  root <- "E:/CRC/Results/Results/01_Data_and_Preprocessing"
-  
-  dir.create(
-    root,
-    recursive = TRUE,
-    showWarnings = FALSE
-  )
-  
-  if (!dir.exists(root)) {
-    stop("Cannot create directory: ", root)
-  }
-  
-  out <- function(name) file.path(root, name)
-  
-  # ----------------------------------------------------------
-  # 2. Required packages
-  # ----------------------------------------------------------
-  
-  for (p in c(
-    "Matrix",
-    "data.table",
-    "R.utils",
-    "Seurat",
-    "ggplot2"
-  )) {
-    if (!requireNamespace(p, quietly = TRUE)) {
-      stop("Install package: ", p)
-    }
-  }
-  
-  library(Matrix)
-  library(data.table)
-  
-  # ----------------------------------------------------------
-  # 3. Input files
-  # ----------------------------------------------------------
-  
-  count_file <- file.path(
-    input_root,
-    "GSE132465_GEO_processed_CRC_10X_raw_UMI_count_matrix.txt.gz"
-  )
-  
-  annotation_file <- file.path(
-    input_root,
-    "GSE132465_GEO_processed_CRC_10X_cell_annotation.txt.gz"
-  )
-  
-  input_files <- c(count_file, annotation_file)
-  
-  if (!all(file.exists(input_files))) {
-    stop(
-      "Missing GEO input files: ",
-      paste(
-        input_files[!file.exists(input_files)],
-        collapse = "; "
-      )
-    )
-  }
-  
-  # ----------------------------------------------------------
-  # 4. Metadata and paired sample selection
-  # ----------------------------------------------------------
-  
-  metadata <- as.data.frame(
-    fread(
-      annotation_file,
-      sep = "\t",
-      check.names = FALSE
-    )
-  )
-  
-  required <- c("Index", "Sample", "Patient", "Class")
-  
-  if (!all(required %in% names(metadata))) {
-    stop(
-      "Missing metadata columns: ",
-      paste(
-        setdiff(required, names(metadata)),
-        collapse = ", "
-      )
-    )
-  }
-  
-  if (
-    anyNA(metadata$Index) ||
-    anyDuplicated(metadata$Index)
-  ) {
-    stop("Invalid or duplicated cell IDs")
-  }
-  
-  rownames(metadata) <- as.character(metadata$Index)
-  
+  input_root <- Sys.getenv("CRC_SCRNA_INPUT", "E:/CRC/Results/GSE132465_scRNA")
+  output_dir <- Sys.getenv("CRC_SCRNA_OUTPUT", "E:/CRC/Results/Results/01_Data_and_Preprocessing")
   patients <- sprintf("SMC%02d", 1:10)
-  
-  wanted <- as.vector(
-    outer(patients, c("-N", "-T"), paste0)
-  )
-  
-  metadata <- metadata[
-    as.character(metadata$Sample) %in% wanted,
-    ,
-    drop = FALSE
-  ]
-  
-  for (patient in patients) {
-    
-    observed <- unique(as.character(metadata$Sample))
-    
-    if (!all(
-      paste0(patient, c("-N", "-T")) %in% observed
-    )) {
-      stop("Missing pair for ", patient)
-    }
-    
-    patient_ids <- unique(
-      as.character(
-        metadata$Patient[
-          as.character(metadata$Sample) %in%
-            paste0(patient, c("-N", "-T"))
-        ]
-      )
-    )
-    
-    if (length(patient_ids) != 1L) {
-      stop("Inconsistent patient IDs for ", patient)
-    }
-  }
-  
-  # ----------------------------------------------------------
-  # 5. Import selected cells into a sparse matrix
-  # ----------------------------------------------------------
-  
-  read_sparse_counts <- function(
-    path,
-    selected,
-    block_rows = 100L
-  ) {
-    
+  block_rows <- 100L
+
+  packages <- c("Matrix", "data.table", "R.utils", "Seurat", "ggplot2")
+  missing <- packages[!vapply(packages, requireNamespace, logical(1), quietly = TRUE)]
+  if (length(missing)) stop("Required packages: ", paste(missing, collapse = ", "))
+
+  count_file <- file.path(input_root, "GSE132465_GEO_processed_CRC_10X_raw_UMI_count_matrix.txt.gz")
+  annotation_file <- file.path(input_root, "GSE132465_GEO_processed_CRC_10X_cell_annotation.txt.gz")
+  missing <- c(count_file, annotation_file)[!file.exists(c(count_file, annotation_file))]
+  if (length(missing)) stop("Missing input: ", paste(missing, collapse = "; "))
+  dir.create(output_dir, recursive = TRUE, showWarnings = FALSE)
+  if (!dir.exists(output_dir)) stop("Cannot create output directory: ", output_dir)
+  out <- function(name) file.path(output_dir, name)
+
+  # Select the prespecified matched samples using published annotations.
+  metadata <- as.data.frame(data.table::fread(annotation_file, sep = "\t", check.names = FALSE))
+  required <- c("Index", "Sample", "Patient", "Class")
+  if (!all(required %in% names(metadata))) stop("Missing metadata: ", paste(setdiff(required, names(metadata)), collapse = ", "))
+  if (anyNA(metadata$Index) || any(!nzchar(metadata$Index)) || anyDuplicated(metadata$Index)) stop("Invalid cell IDs")
+  rownames(metadata) <- as.character(metadata$Index)
+  wanted <- as.vector(outer(patients, c("-N", "-T"), paste0))
+  metadata <- metadata[metadata$Sample %in% wanted, , drop = FALSE]
+  if (anyNA(metadata[, required])) stop("Missing sample, patient or tissue labels")
+  if (!all(wanted %in% metadata$Sample)) stop("One or more matched samples are missing")
+  expected_patient <- sub("-[NT]$", "", as.character(metadata$Sample))
+  expected_class <- ifelse(grepl("-N$", metadata$Sample), "Normal", "Tumor")
+  if (any(metadata$Patient != expected_patient) || any(metadata$Class != expected_class)) stop("Inconsistent patient/tissue labels")
+
+  # Stream gene blocks rather than importing the full dense matrix.
+  read_sparse_counts <- function(path, selected, block_rows) {
     con <- gzfile(path, "rt")
-    on.exit(close(con))
-    
-    header <- strsplit(
-      readLines(con, n = 1L),
-      "\t",
-      fixed = TRUE
-    )[[1L]]
-    
-    all_cells <- header[-1L]
-    
-    if (anyDuplicated(all_cells)) {
-      stop("Duplicate matrix cell IDs")
-    }
-    
-    indices <- match(selected, all_cells)
-    
-    if (anyNA(indices)) {
-      stop(
-        "Selected annotation cells absent from count matrix: ",
-        sum(is.na(indices))
-      )
-    }
-    
+    on.exit(close(con), add = TRUE)
+    header <- readLines(con, n = 1L, warn = FALSE)
+    if (!length(header)) stop("Empty count file")
+    header <- gsub('^"|"$', "", strsplit(header, "\t", fixed = TRUE)[[1L]])
+    cells <- header[-1L]
+    if (anyDuplicated(cells)) stop("Duplicate matrix cell IDs")
+    indices <- match(selected, cells)
+    if (anyNA(indices)) stop("Selected cells absent from count matrix")
     blocks <- list()
     genes <- character()
-    b <- 0L
-    
     repeat {
-      
-      lines <- readLines(con, n = block_rows)
-      
+      lines <- readLines(con, n = block_rows, warn = FALSE)
       if (!length(lines)) break
-      
       fields <- strsplit(lines, "\t", fixed = TRUE)
-      
-      if (any(lengths(fields) != length(header))) {
-        stop("Malformed count matrix row")
-      }
-      
-      gene <- vapply(
-        fields,
-        `[`,
-        character(1),
-        1L
-      )
-      
-      values <- lapply(
-        fields,
-        function(z) as.numeric(z[indices + 1L])
-      )
-      
-      invalid_counts <- vapply(
-        values,
-        function(v) {
-          anyNA(v) ||
-            any(!is.finite(v)) ||
-            any(v < 0) ||
-            any(v != floor(v))
-        },
-        logical(1)
-      )
-      
-      if (any(invalid_counts)) {
-        stop("Invalid UMI counts")
-      }
-      
-      nz <- lapply(
-        values,
-        function(v) which(v != 0)
-      )
-      
-      ii <- rep.int(seq_along(nz), lengths(nz))
-      jj <- unlist(nz, use.names = FALSE)
-      
-      xx <- unlist(
-        Map(
-          function(v, j) v[j],
-          values,
-          nz
-        ),
-        use.names = FALSE
-      )
-      
-      b <- b + 1L
-      
-      blocks[[b]] <- sparseMatrix(
-        i = ii,
-        j = jj,
-        x = xx,
+      if (any(lengths(fields) != length(header))) stop("Malformed count row")
+      gene <- gsub('^"|"$', "", vapply(fields, `[`, character(1), 1L))
+      values <- lapply(fields, function(z) as.numeric(z[indices + 1L]))
+      invalid <- vapply(values, function(v) any(!is.finite(v)) || any(v < 0) || any(v != floor(v)), logical(1))
+      if (any(invalid)) stop("Invalid UMI counts")
+      nz <- lapply(values, function(v) which(v != 0))
+      blocks[[length(blocks) + 1L]] <- Matrix::sparseMatrix(
+        i = rep.int(seq_along(nz), lengths(nz)),
+        j = unlist(nz, use.names = FALSE),
+        x = unlist(Map(function(v, j) v[j], values, nz), use.names = FALSE),
         dims = c(length(lines), length(selected))
       )
-      
       genes <- c(genes, gene)
-      
-      if (b %% 25L == 0L) {
-        message("Imported genes: ", length(genes))
-      }
+      if (length(blocks) %% 25L == 0L) message("Imported genes: ", length(genes))
     }
-    
-    if (!length(blocks)) {
-      stop("Empty matrix")
-    }
-    
+    if (!length(blocks)) stop("No count rows")
+    if (anyNA(genes) || any(!nzchar(genes)) || anyDuplicated(genes)) stop("Invalid gene identifiers")
     mat <- do.call(rbind, blocks)
-    
-    if (
-      anyNA(genes) ||
-      any(!nzchar(genes)) ||
-      anyDuplicated(genes)
-    ) {
-      stop(
-        "Blank/duplicate gene identifiers; inspect raw matrix"
-      )
-    }
-    
-    rownames(mat) <- genes
-    colnames(mat) <- selected
-    
+    dimnames(mat) <- list(genes, selected)
     mat
   }
-  
-  con <- gzfile(count_file, "rt")
-  header <- readLines(con, n = 1L)
-  close(con)
-  
-  matrix_cells <- strsplit(
-    header,
-    "\t",
-    fixed = TRUE
-  )[[1L]][-1L]
-  
-  selected <- intersect(
-    rownames(metadata),
-    matrix_cells
-  )
-  
-  if (!length(selected)) {
-    stop("No matching selected cells")
-  }
-  
-  if (length(selected) != nrow(metadata)) {
-    stop(
-      "Annotation cells are absent from count matrix; inspect inputs"
-    )
-  }
-  
-  metadata <- metadata[selected, , drop = FALSE]
-  
-  counts <- read_sparse_counts(
-    count_file,
-    selected
-  )
-  
-  stopifnot(
-    identical(colnames(counts), rownames(metadata))
-  )
-  
-  # ----------------------------------------------------------
-  # 6. Save import outputs
-  # ----------------------------------------------------------
-  
-  write.csv(
-    as.data.frame(
-      table(metadata$Patient, metadata$Class)
-    ),
-    out("01_pair_counts.csv"),
-    row.names = FALSE
-  )
-  
-  write.csv(
-    data.frame(
-      genes = nrow(counts),
-      cells = ncol(counts)
-    ),
-    out("01_import_summary.csv"),
-    row.names = FALSE
-  )
-  
-  saveRDS(
-    counts,
-    out("01_counts_paired.rds")
-  )
-  
-  saveRDS(
-    metadata,
-    out("01_metadata_paired.rds")
-  )
-  
-})
 
-invisible(gc())
+  counts <- read_sparse_counts(count_file, rownames(metadata), block_rows)
+  stopifnot(identical(colnames(counts), rownames(metadata)))
+  utils::write.csv(as.data.frame(table(metadata$Patient, metadata$Class)), out("01_pair_counts.csv"), row.names = FALSE)
+  utils::write.csv(data.frame(genes = nrow(counts), cells = ncol(counts)), out("01_import_summary.csv"), row.names = FALSE)
+  saveRDS(counts, out("01_counts_paired.rds"))
+  saveRDS(metadata, out("01_metadata_paired.rds"))
 
-local({
-  
-  # ----------------------------------------------------------
-  # 7. Load imported data
-  # ----------------------------------------------------------
-  
-  library(Seurat)
-  
-  root <- "E:/CRC/Results/Results/01_Data_and_Preprocessing"
-  
-  if (!dir.exists(root)) {
-    stop("Directory does not exist: ", root)
-  }
-  
-  out <- function(name) file.path(root, name)
-  
-  counts <- readRDS(
-    out("01_counts_paired.rds")
-  )
-  
-  metadata <- readRDS(
-    out("01_metadata_paired.rds")
-  )
-  
-  stopifnot(
-    identical(colnames(counts), rownames(metadata))
-  )
-  
-  # ----------------------------------------------------------
-  # 8. Create Seurat object
-  # ----------------------------------------------------------
-  
-  obj <- CreateSeuratObject(
-    counts = counts,
-    meta.data = metadata,
-    project = "GSE132465_CRC",
-    min.cells = 3,
-    min.features = 200
-  )
-  
+  obj <- Seurat::CreateSeuratObject(counts = counts, meta.data = metadata,
+                                  project = "GSE132465_CRC", min.cells = 3, min.features = 200)
+  rm(counts, metadata)
+  invisible(gc())
   obj$sample_id <- as.character(obj$Sample)
-  
-  obj$patient_id <- sub(
-    "-[NT]$",
-    "",
-    obj$sample_id
-  )
-  
-  if (any(
-    as.character(obj$Patient) != obj$patient_id
-  )) {
-    stop("Patient metadata mismatch")
-  }
-  
+  obj$patient_id <- sub("-[NT]$", "", obj$sample_id)
   obj$group <- as.character(obj$Class)
-  
-  if (
-    !all(obj$group %in% c("Normal", "Tumor")) ||
-    any(
-      obj$sample_id != paste0(
-        obj$patient_id,
-        ifelse(obj$group == "Normal", "-N", "-T")
-      )
-    )
-  ) {
-    stop("Unexpected tissue/patient labels")
-  }
-  
-  if (!any(grepl("^MT-", rownames(obj)))) {
-    stop(
-      "No MT- genes: mitochondrial QC cannot be computed"
-    )
-  }
-  
-  obj$percent.mt <- PercentageFeatureSet(
-    obj,
-    pattern = "^MT-"
-  )
-  
-  # ----------------------------------------------------------
-  # 9. Save QC metadata and plots before filtering
-  # ----------------------------------------------------------
-  
-  write.csv(
-    obj@meta.data,
-    out("02_qc_before.csv"),
-    row.names = TRUE
-  )
-  
-  pdf(
-    out("02_qc_before.pdf"),
-    width = 12,
-    height = 5
-  )
-  
-  print(
-    VlnPlot(
-      obj,
-      features = c(
-        "nFeature_RNA",
-        "nCount_RNA",
-        "percent.mt"
-      ),
-      ncol = 3,
-      pt.size = 0
-    )
-  )
-  
-  dev.off()
-  
-  before <- ncol(obj)
-  
-  # ----------------------------------------------------------
-  # 10. Quality-control filtering
-  # ----------------------------------------------------------
-  
-  obj <- subset(
-    obj,
-    subset =
-      nFeature_RNA > 200 &
-      nFeature_RNA < 6000 &
-      percent.mt < 20
-  )
-  
-  if (ncol(obj) == 0) {
-    stop("No cells remain after QC")
-  }
-  
-  # ----------------------------------------------------------
-  # 11. Save QC metadata and plots after filtering
-  # ----------------------------------------------------------
-  
-  write.csv(
-    obj@meta.data,
-    out("02_qc_after.csv"),
-    row.names = TRUE
-  )
-  
-  qc_summary <- data.frame(
-    Stage = c("Before_QC", "After_QC"),
-    Cells = c(before, ncol(obj))
-  )
-  
-  write.csv(
-    qc_summary,
-    out("02_qc_summary.csv"),
-    row.names = FALSE
-  )
-  
-  pdf(
-    out("02_qc_after.pdf"),
-    width = 12,
-    height = 5
-  )
-  
-  print(
-    VlnPlot(
-      obj,
-      features = c(
-        "nFeature_RNA",
-        "nCount_RNA",
-        "percent.mt"
-      ),
-      ncol = 3,
-      pt.size = 0
-    )
-  )
-  
-  dev.off()
-  
-  # ----------------------------------------------------------
-  # 12. Save final Seurat object and session information
-  # ----------------------------------------------------------
-  
-  saveRDS(
-    obj,
-    out("02_seurat_qc.rds")
-  )
-  
-  writeLines(
-    capture.output(sessionInfo()),
-    out("01_sessionInfo.txt")
-  )
-  
-  # ----------------------------------------------------------
-  # 13. Completion summary
-  # ----------------------------------------------------------
-  
-  cat("\nData and Preprocessing completed.\n")
-  cat("Cells before QC:", before, "\n")
-  cat("Cells after QC:", ncol(obj), "\n")
-  cat("Cells removed:", before - ncol(obj), "\n")
-  cat("Genes in final Seurat object:", nrow(obj), "\n")
-  cat(
-    "Maximum mitochondrial percentage:",
-    max(obj$percent.mt),
-    "\n"
-  )
-  cat("Output folder:", root, "\n")
-  
-})
+  if (!any(grepl("^MT-", rownames(obj)))) stop("No MT- genes for mitochondrial QC")
+  obj$percent.mt <- Seurat::PercentageFeatureSet(obj, pattern = "^MT-")
 
+  save_qc <- function(object, phase) {
+    utils::write.csv(object[[]], out(paste0("02_qc_", phase, ".csv")), row.names = TRUE)
+    grDevices::pdf(out(paste0("02_qc_", phase, ".pdf")), width = 12, height = 5)
+    on.exit(grDevices::dev.off(), add = TRUE)
+    print(Seurat::VlnPlot(object, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), ncol = 3, pt.size = 0))
+  }
+  # Before-QC records follow initial Seurat inclusion, not raw input.
+  before <- ncol(obj)
+  save_qc(obj, "before")
+  obj <- subset(obj, subset = nFeature_RNA > 200 & nFeature_RNA < 6000 & percent.mt < 20)
+  if (!ncol(obj)) stop("No cells remain after QC")
+  save_qc(obj, "after")
+  utils::write.csv(data.frame(Stage = c("Before_QC", "After_QC"), Cells = c(before, ncol(obj))),
+                   out("02_qc_summary.csv"), row.names = FALSE)
+  saveRDS(obj, out("02_seurat_qc.rds"))
+  writeLines(capture.output(utils::sessionInfo()), out("01_sessionInfo.txt"))
+  cat("\nPreprocessing complete\nCells before additional QC:", before,
+      "\nCells after QC:", ncol(obj), "\nCells removed:", before - ncol(obj),
+      "\nRetained genes:", nrow(obj), "\nMaximum mitochondrial percentage:", max(obj$percent.mt),
+      "\nOutput:", output_dir, "\n")
+})
 invisible(gc())
