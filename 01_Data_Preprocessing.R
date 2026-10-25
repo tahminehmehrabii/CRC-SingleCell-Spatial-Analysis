@@ -1,5 +1,5 @@
 # GSE132465: import 10 matched tumor-normal pairs and apply cell-level QC.
-# Requires locally downloaded GEO files; no installation or downloads.
+# Requires locally downloaded GEO files.
 local({
   input_root <- Sys.getenv("CRC_SCRNA_INPUT", "E:/CRC/Results/GSE132465_scRNA")
   output_dir <- Sys.getenv("CRC_SCRNA_OUTPUT", "E:/CRC/Results/Results/01_Data_and_Preprocessing")
