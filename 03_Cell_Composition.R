@@ -1,15 +1,3 @@
-# CORE WORKFLOW: 03_Cell_Composition.R
-# Existing output directories are retained for compatibility.
-# UPDATED: corrected input path; added exact signed-rank sensitivity CSV.
-# Primary tables and figures retain the original analysis and styling.
-# 03_Cell-Type and Subtype Composition Analysis
-# Run the whole script after preprocessing and annotation.
-# Input is preserved; ALL outputs are written to output_root.
-# Figures: PNG only, 600 dpi. Tables: CSV.
-# Subtype percentages use all cells in each sample, not only the parent type.
-# Existing GEO subtype annotations are used; no reclustering is performed.
-# Broad-only BH correction and combined broad/subtype BH correction are retained.
-
 # 01. Configure input and output folders
 input_root <- "E:/CRC/Results/Results/02_Clustering_Markers_Annotation"
 output_root <- "E:/CRC/Results/Results/03_Cell-Type and Subtype Composition Analysis"
