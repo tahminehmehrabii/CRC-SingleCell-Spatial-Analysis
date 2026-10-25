@@ -108,15 +108,12 @@ local({
   reference_labels <- droplevels(reference_labels[good])
   reference_nUMI <- reference_nUMI[good]
   reference <- spacexr::Reference(reference_counts, reference_labels, reference_nUMI)
-  cat("Reference label source:", label_column, "\n")
-  print(table(reference_labels))
   rm(ref_obj, counts)
   invisible(gc())
   host_list <- bacteria_list <- taxa_list <- rctd_list <- qc_list <- availability_list <- manifest_list <- status_list <- list()
 
   for (i in seq_len(nrow(meta))) {
     ss <- meta$section[i]; gsm <- meta$GSM[i]
-    message("Processing ", ss)
     files <- all_files[grepl(gsm, all_files, fixed = TRUE) | grepl(ss, all_files, fixed = TRUE)]
     nested <- files[grepl("\\.(tar|tar\\.gz|tgz|zip)$", files, ignore.case = TRUE)]
     if (length(nested)) {
@@ -217,7 +214,6 @@ local({
     attempt <- tryCatch({
       if (!is.null(cached) && identical(cached$signature, signature) && is.matrix(cached$weights) &&
           all(is.finite(cached$weights))) {
-        message("Reusing RCTD cache: ", ss)
         weights <- cached$weights
       } else {
         query_obj <- spacexr::SpatialRNA(coords, query, query_umi)
@@ -311,23 +307,12 @@ local({
   write_tab(data.frame(Extraction_version = "feature_name_column2_bacteria_only_v2", Feature_name_column = 2L,
     Feature_type_column = 3L, Bacterial_group_allowlist_size = 19L,
     Interpretation = "Deposited bacteria-only probe labels, not confirmed taxa/viability", Completed = as.character(Sys.time())), "Bacterial_extraction_VALIDATED.csv")
-  writeLines(c(
-    "Exploratory 15-gene/six-signature panel; no classifier or assumed direction.",
-    "Host marker names and per-spot detected-gene counts are separate variables.",
-    "KRT18 is excluded from standalone panels but used in the epithelial signature when present.",
-    "Signature scores are available-gene means of log-normalized host expression.",
-    "Map colour scales are shared within each section, not across sections.",
-    "Bacterial values are deposited probe-group counts, not verified organisms, viability or normalized bacterial abundance.",
-    "RCTD weights are reference-dependent mixture estimates; zero-weight rows do not provide resolved composition.",
-    "Only two patients: maps are descriptive, not independent-spot significance tests.",
-    "No classifier, trajectory or CellChat analysis is performed."), out("Core_Methods_Notes.txt"))
   files <- c("04_QC_summary_MATCHED.csv", "05_Host_gene_availability_MATCHED.csv", "06_Bacterial_signal_All_spots_MATCHED.csv",
     "08_RCTD_status_MATCHED.csv", "09_RCTD_All_spot_celltype_proportions_MATCHED.csv", "21_Final_ST_21_Feature_Panel.csv",
     "22_Final_21_Features_All_spots.csv", "26_Final_21_Features_Section_Summary.csv", "Bacterial_extraction_VALIDATED.csv",
-    "20_sessionInfo.txt", "Core_Methods_Notes.txt")
+    "20_sessionInfo.txt")
   saveRDS(list(revision = "core-v1", host_marker_fix = "marker-qc-separation-v1", files = files,
     md5 = unname(tools::md5sum(out(files))), reference_file = config$reference_file,
     reference_md5 = unname(tools::md5sum(config$reference_file)), completed = Sys.time()), complete)
-  cat("\nSpatial stage complete\nOutput:", output_root, "\n")
 })
 invisible(gc())
