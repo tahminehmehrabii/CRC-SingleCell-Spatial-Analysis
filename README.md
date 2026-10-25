@@ -9,6 +9,10 @@ An R workflow integrating **single-cell RNA sequencing** and **spatial transcrip
 
 The single-cell reference supports spatial cell-type deconvolution using **RCTD**.
 
+![Single-cell and spatial analysis](image/image.png)
+
+## Datasets
+
 ## Workflow
 
 | Stage | Script | Purpose |
